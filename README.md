@@ -71,6 +71,6 @@ plt.show()
 ## Running the Web App
 
 ```bash
-python3 app.py
+python app.py
 ```
 Open your browser at `http://localhost:5000`.
