@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seismic Signal Visualizer</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f4f4f9;
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        input[type="text"],
+        input[type="number"],
+        select {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            text-decoration: none;
+        }
+
+        .btn:hover {
+            background-color: #0056b3;
+        }
+
+        .btn-danger {
+            background-color: #dc3545;
+        }
+
+        .btn-danger:hover {
+            background-color: #c82333;
+        }
+
+        .btn-secondary {
+            background-color: #6c757d;
+        }
+
+        .btn-secondary:hover {
+            background-color: #5a6268;
+        }
+
+        .plot-container {
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        img {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        .error {
+            color: red;
+            background: #ffe6e6;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+
+        .row {
+            display: flex;
+            gap: 20px;
+        }
+
+        .col {
+            flex: 1;
+        }
+
+        .panel {
+            border: 1px solid #eee;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+
+        .history-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .history-list li {
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+            font-size: 0.9em;
+        }
+
+        .history-list li:last-child {
+            font-weight: bold;
+            color: #007bff;
+        }
+
+        .domain-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            background: #e9ecef;
+            border-radius: 4px;
+            font-size: 0.8em;
+            margin-left: 5px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <h1>Seismic Signal Visualizer</h1>
+
+        {% with messages = get_flashed_messages() %}
+        {% if messages %}
+        <div class="error">
+            {% for message in messages %}
+            <p>{{ message }}</p>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        <!-- Tabs Navigation -->
+        <div style="margin-top: 20px; border-bottom: 1px solid #ccc;">
+            <button class="tab-btn {% if active_tab != 'thomson' %}active{% endif %}"
+                onclick="openTab(event, 'Waveform')">Waveform Processing</button>
+            <button class="tab-btn {% if active_tab == 'thomson' %}active{% endif %}"
+                onclick="openTab(event, 'Thomson')">Thomson-Haskell Calculator</button>
+        </div>
+
+        <!-- Waveform Tab -->
+        <div id="Waveform" class="tab-content"
+            style="display: {% if active_tab == 'thomson' %}none{% else %}block{% endif %};">
+            {% if not current_info %}
+            <!-- Upload Section (Moved inside tab) -->
+            <div class="panel" style="margin-top: 20px;">
+                <h3>Upload New File</h3>
+                <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <label for="waveform_file">Waveform File (MSEED/SAC):</label>
+                        <input type="file" name="waveform_file" id="waveform_file" required>
+                    </div>
+                    <button type="submit" class="btn">Upload & Start</button>
+                </form>
+            </div>
+            {% else %}
+            <!-- Dashboard (Moved inside tab) -->
+            <div class="row" style="margin-top: 20px;">
+                <!-- Sidebar: Controls & History -->
+                <div class="col" style="flex: 0 0 350px;">
+
+                    <div class="panel">
+                        <h3>Current State</h3>
+                        <p><strong>File:</strong> {{ current_info.filename }}</p>
+                        <h4>Domains:</h4>
+                        <ul>
+                            {% for tr_id, domain in current_info.domains.items() %}
+                            <li>{{ tr_id }}: <span class="domain-badge">{{ domain }}</span></li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+
+                    {% if current_info.traces|length > 1 %}
+                    <div class="panel">
+                        <h3>Trace Selection (View Only)</h3>
+                        <form action="{{ url_for('action') }}" method="post">
+                            <input type="hidden" name="type" value="select_traces">
+                            <div
+                                style="max-height: 150px; overflow-y: auto; margin-bottom: 10px; border: 1px solid #ddd; padding: 5px;">
+                                {% for tr in current_info.traces %}
+                                <div>
+                                    <label style="font-weight: normal; font-size: 0.9em;">
+                                        <input type="checkbox" name="trace_indices" value="{{ tr.index }}" {% if
+                                            tr.visible %}checked{% endif %}>
+                                        {{ tr.id }}
+                                    </label>
+                                </div>
+                                {% endfor %}
+                            </div>
+                            <button type="submit" class="btn btn-secondary" style="width:100%">Update View</button>
+                        </form>
+                    </div>
+                    {% endif %}
+
+                    <!-- Instrumental Response Removal -->
+                    <div class="panel" style="margin-top: 20px;">
+                        <h3>Instrumental Response</h3>
+                        <form action="{{ url_for('remove_response') }}" method="post" enctype="multipart/form-data">
+                            <div class="form-group">
+                                <label>Response File (StationXML/XML):</label>
+                                <input type="file" name="response_file" class="form-control-file" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Pre-filter (f1, f2, f3, f4):</label>
+                                <input type="text" name="pre_filt" class="form-control" value="0.005, 0.01, 10, 20">
+                                <small class="form-text text-muted">Frequency domain taper.</small>
+                            </div>
+                            <div class="form-group">
+                                <label>Water Level (dB):</label>
+                                <input type="number" step="any" name="water_level" class="form-control" value="60">
+                            </div>
+                            <div class="form-group">
+                                <label>Output Units:</label>
+                                <select name="output" class="form-control">
+                                    <option value="DISP">Displacement</option>
+                                    <option value="VEL" selected>Velocity</option>
+                                    <option value="ACC">Acceleration</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="btn btn-secondary" style="width:100%">Remove Response</button>
+                        </form>
+                    </div>
+
+                    <div class="panel">
+                        <h3>Actions</h3>
+
+                        <!-- Detrend -->
+                        <form action="{{ url_for('action') }}" method="post" class="form-group">
+                            <input type="hidden" name="type" value="detrend">
+                            <button type="submit" class="btn btn-secondary" style="width:100%">Detrend (Linear &
+                                Demean)</button>
+                        </form>
+
+                        <!-- Taper -->
+                        <form action="{{ url_for('action') }}" method="post" class="form-group">
+                            <input type="hidden" name="type" value="taper">
+                            <button type="submit" class="btn btn-secondary" style="width:100%">Taper (Hann
+                                0.05)</button>
+                        </form>
+
+                        <!-- Filter -->
+                        <form action="{{ url_for('action') }}" method="post" class="form-group"
+                            style="background:#f8f9fa; padding:10px; border-radius:4px;">
+                            <label>Filter (Hz):</label>
+                            <div style="display:flex; gap:5px; margin-bottom:5px;">
+                                <input type="number" step="any" name="freqmin" placeholder="Min">
+                                <input type="number" step="any" name="freqmax" placeholder="Max">
+                            </div>
+                            <input type="hidden" name="type" value="filter">
+                            <button type="submit" class="btn btn-secondary" style="width:100%">Apply Filter</button>
+                        </form>
+
+                        <!-- Integration / Differentiation -->
+                        <div class="row" style="gap:5px;">
+                            <form action="{{ url_for('action') }}" method="post" style="flex:1">
+                                <input type="hidden" name="type" value="integrate">
+                                <button type="submit" class="btn btn-secondary" style="width:100%">Integrate</button>
+                            </form>
+                            <form action="{{ url_for('action') }}" method="post" style="flex:1">
+                                <input type="hidden" name="type" value="differentiate">
+                                <button type="submit" class="btn btn-secondary"
+                                    style="width:100%">Differentiate</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div class="panel">
+                        <h3>History</h3>
+                        <ul class="history-list">
+                            {% for step in current_info.history %}
+                            <li>{{ loop.index0 }}. {{ step.action }}</li>
+                            {% endfor %}
+                        </ul>
+                        <div style="margin-top: 10px; display:flex; gap:5px;">
+                            <form action="{{ url_for('undo') }}" method="post" style="flex:1">
+                                <button type="submit" class="btn btn-danger" style="width:100%">Undo Last</button>
+                            </form>
+                            <form action="{{ url_for('reset') }}" method="post" style="flex:1">
+                                <button type="submit" class="btn btn-danger" style="width:100%">Reset All</button>
+                            </form>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- Main: Plots -->
+                <div class="col">
+                    {% if plot_url %}
+                    <div class="plot-container">
+                        <h3>Waveform</h3>
+                        <img id="img_waveform" src="data:image/png;base64,{{ plot_url }}" alt="Seismic Plot">
+                        <br>
+                        <button class="btn btn-secondary" style="margin-top:10px;"
+                            onclick="downloadImage('img_waveform', 'waveform.png')">Download Image</button>
+                    </div>
+                    {% endif %}
+
+                    {% if spectrum_url %}
+                    <div class="plot-container">
+                        <h3>Fourier Spectrum (Log-Log)</h3>
+                        <img id="img_spectrum" src="data:image/png;base64,{{ spectrum_url }}" alt="Fourier Spectrum">
+                        <br>
+                        <button class="btn btn-secondary" style="margin-top:10px;"
+                            onclick="downloadImage('img_spectrum', 'spectrum.png')">Download Image</button>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Thomson-Haskell Tab -->
+        <div id="Thomson" class="tab-content"
+            style="display: {% if active_tab == 'thomson' %}block{% else %}none{% endif %}; margin-top: 20px;">
+            <div class="row">
+                <div class="col" style="flex: 0 0 400px;">
+                    <div class="panel">
+                        <h3>Parameters</h3>
+                        <form action="{{ url_for('calc_thomson') }}" method="post">
+
+                            <h4>Building Layers (Top to Bottom)</h4>
+                            <div id="building_layers">
+                                <div class="layer-row">
+                                    <input type="number" step="any" name="b_height" placeholder="H (m)" required>
+                                    <input type="number" step="any" name="b_vs" placeholder="Vs (m/s)" required>
+                                    <input type="number" step="any" name="b_rho" placeholder="Rho" value="2400"
+                                        required>
+                                    <input type="number" step="any" name="b_qs" placeholder="Q" required
+                                        oninput="syncDamping(this)">
+                                    <input type="number" step="any" name="b_damping" placeholder="Damping"
+                                        oninput="syncQ(this)">
+                                    <button type="button" class="btn btn-danger" onclick="removeLayer(this)"
+                                        style="padding: 0 10px;">X</button>
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-secondary" onclick="addLayer('building_layers')"
+                                style="margin-top:5px; font-size:0.8em;">+ Add Layer</button>
+
+                            <h4 style="margin-top:20px;">Soil Layers (Top to Bottom)</h4>
+                            <div id="soil_layers">
+                                <!-- Default Halfspace -->
+                                <div class="layer-row">
+                                    <input type="number" step="any" name="s_height" placeholder="H (m)" disabled
+                                        style="background:#eee;" title="Halfspace has infinite height">
+                                    <input type="number" step="any" name="s_vs" placeholder="Vs (m/s)" value="800"
+                                        required>
+                                    <input type="number" step="any" name="s_rho" placeholder="Rho" value="2400"
+                                        required>
+                                    <input type="number" step="any" name="s_qs" placeholder="Q" value="500" required
+                                        oninput="syncDamping(this)">
+                                    <input type="number" step="any" name="s_damping" placeholder="Damping" value="0.001"
+                                        oninput="syncQ(this)">
+                                    <!-- No remove button for halfspace to ensure at least one layer exists -->
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-secondary" onclick="addSoilLayer()"
+                                style="margin-top:5px; font-size:0.8em;">+ Add Layer</button>
+
+                            <h4 style="margin-top:20px;">Frequency</h4>
+                            <div class="row" style="gap:5px;">
+                                <input type="number" step="any" name="f_min" value="0.1" placeholder="Min">
+                                <input type="number" step="any" name="f_max" value="50" placeholder="Max">
+                                <input type="number" step="1" name="f_steps" value="500" placeholder="Steps">
+                            </div>
+
+                            <button type="submit" class="btn" style="margin-top:20px; width:100%;">Calculate Transfer
+                                Function</button>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="col">
+                    <!-- Stacked Plots -->
+
+                    {% if tf_url %}
+                    <div class="plot-container">
+                        <h3>Transfer Function</h3>
+                        <img id="img_tf" src="data:image/png;base64,{{ tf_url }}" alt="Transfer Function">
+                        <br>
+                        <button class="btn btn-secondary" style="margin-top:10px;"
+                            onclick="downloadImage('img_tf', 'transfer_function.png')">Download Image</button>
+                        <a href="{{ url_for('download_file', filename=npz_filename) }}" class="btn"
+                            style="margin-top:10px;">Download NPZ</a>
+                    </div>
+                    {% endif %}
+
+                    {% if drift_url %}
+                    <div class="plot-container" style="margin-top: 20px;">
+                        <h3>Drift Estimation</h3>
+                        <img id="img_drift" src="data:image/png;base64,{{ drift_url }}" alt="Drift Estimation Plots">
+                        <br>
+                        <button class="btn btn-secondary" style="margin-top:10px;"
+                            onclick="downloadImage('img_drift', 'drift_estimation.png')">Download Image</button>
+                        {% if mseed_filename %}
+                        <a href="{{ url_for('download_file', filename=mseed_filename) }}" class="btn"
+                            style="margin-top:10px;">Download Traces (MSEED)</a>
+                        {% endif %}
+                    </div>
+                    {% elif not tf_url %}
+                    <!-- Show info only if nothing calculated yet -->
+                    <div class="alert alert-info" style="margin-top: 20px;">
+                        <p>Configure layers and click "Calculate" to see results.</p>
+                    </div>
+                    {% endif %}
+
+                    {% if sketch_url %}
+                    <div class="plot-container" style="margin-top:20px;">
+                        <h3>Model Sketch</h3>
+                        <img id="img_sketch" src="data:image/png;base64,{{ sketch_url }}" alt="Model Sketch">
+                        <br>
+                        <button class="btn btn-secondary" style="margin-top:10px;"
+                            onclick="downloadImage('img_sketch', 'model_sketch.png')">Download Image</button>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        function downloadImage(imgId, filename) {
+            var img = document.getElementById(imgId);
+            if (!img) return;
+            var url = img.src;
+            var link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        function openTab(evt, tabName) {
+            var i, tabcontent, tablinks;
+            tabcontent = document.getElementsByClassName("tab-content");
+            for (i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].style.display = "none";
+            }
+            tablinks = document.getElementsByClassName("tab-btn");
+            for (i = 0; i < tablinks.length; i++) {
+                tablinks[i].className = tablinks[i].className.replace(" active", "");
+            }
+            document.getElementById(tabName).style.display = "block";
+            evt.currentTarget.className += " active";
+        }
+
+        function removeLayer(btn) {
+            btn.parentNode.remove();
+        }
+
+        function syncDamping(qInput) {
+            var row = qInput.parentNode;
+            var dampingInput = row.querySelector('input[name$="_damping"]');
+            var q = parseFloat(qInput.value);
+            if (q && q !== 0) {
+                dampingInput.value = (1 / (2 * q)).toPrecision(4);
+            } else {
+                dampingInput.value = "";
+            }
+        }
+
+        function syncQ(dampingInput) {
+            var row = dampingInput.parentNode;
+            var qInput = row.querySelector('input[name$="_qs"]');
+            var d = parseFloat(dampingInput.value);
+            if (d && d !== 0) {
+                qInput.value = (1 / (2 * d)).toPrecision(4);
+            } else {
+                qInput.value = "";
+            }
+        }
+
+        function addLayer(containerId) {
+            var container = document.getElementById(containerId);
+            var div = document.createElement('div');
+            div.className = 'layer-row';
+            div.style.marginTop = '5px';
+            div.innerHTML = `
+        <input type="number" step="any" name="b_height" placeholder="H (m)" required>
+        <input type="number" step="any" name="b_vs" placeholder="Vs (m/s)" required>
+        <input type="number" step="any" name="b_rho" placeholder="Rho" value="2400" required>
+        <input type="number" step="any" name="b_qs" placeholder="Q" required oninput="syncDamping(this)">
+        <input type="number" step="any" name="b_damping" placeholder="Damping" oninput="syncQ(this)">
+        <button type="button" class="btn btn-danger" onclick="removeLayer(this)" style="padding: 0 10px;">X</button>
+    `;
+            container.appendChild(div);
+        }
+
+        function addSoilLayer() {
+            var container = document.getElementById('soil_layers');
+
+            var div = document.createElement('div');
+            div.className = 'layer-row';
+            div.style.marginTop = '5px';
+            div.innerHTML = `
+        <input type="number" step="any" name="s_height" placeholder="H (m)" required>
+        <input type="number" step="any" name="s_vs" placeholder="Vs (m/s)" required>
+        <input type="number" step="any" name="s_rho" placeholder="Rho" value="2400" required>
+        <input type="number" step="any" name="s_qs" placeholder="Q" value="500" required oninput="syncDamping(this)">
+        <input type="number" step="any" name="s_damping" placeholder="Damping" oninput="syncQ(this)">
+        <button type="button" class="btn btn-danger" onclick="removeLayer(this)" style="padding: 0 10px;">X</button>
+    `;
+
+            // Insert before the last element (halfspace)
+            container.insertBefore(div, container.lastElementChild);
+        }
+    </script>
+
+</body>
+
+</html>
+```
