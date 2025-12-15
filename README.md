@@ -15,7 +15,7 @@ This project implements a web-based interface for calculating the Thomson-Haskel
 - `numpy`
 - `matplotlib`
 - `flask`
-- `obspy` (for seismological data handling)
+- `obspy`
 
 To install dependencies:
 ```bash
@@ -71,13 +71,6 @@ plt.show()
 ## Running the Web App
 
 ```bash
-python3 app.py
+python app.py
 ```
 Open your browser at `http://localhost:5000`.
-
-## Testing
-
-Run unit tests:
-```bash
-python3 -m unittest discover .
-```

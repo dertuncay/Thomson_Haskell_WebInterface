@@ -158,23 +158,69 @@
 
         <!-- Tabs Navigation -->
         <div style="margin-top: 20px; border-bottom: 1px solid #ccc;">
-            <button class="tab-btn {% if active_tab != 'thomson' %}active{% endif %}"
+            <button class="tab-btn {% if active_tab == 'waveform' or not active_tab %}active{% endif %}"
                 onclick="openTab(event, 'Waveform')">Waveform Processing</button>
             <button class="tab-btn {% if active_tab == 'thomson' %}active{% endif %}"
                 onclick="openTab(event, 'Thomson')">Thomson-Haskell Calculator</button>
+            <button class="tab-btn {% if active_tab == 'deconvolution' %}active{% endif %}"
+                onclick="openTab(event, 'Deconvolution')">Deconvolution</button>
         </div>
 
         <!-- Waveform Tab -->
         <div id="Waveform" class="tab-content"
-            style="display: {% if active_tab == 'thomson' %}none{% else %}block{% endif %};">
+            style="display: {% if active_tab == 'waveform' or not active_tab %}block{% else %}none{% endif %};">
             {% if not current_info %}
+            <!-- Pre-processing Panel -->
+            {% if files_info %}
+            <div class="panel" style="margin-top: 20px; background-color: #f8f9fa;">
+                <h3>Batch Pre-processing</h3>
+                <form action="{{ url_for('deconv_preprocess') }}" method="post">
+                    <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                        <!-- Standard Actions -->
+                        <div style="flex: 1; min-width: 200px;">
+                            <h4>Standard Actions</h4>
+                            <label><input type="checkbox" name="detrend"> Detrend (Linear & Demean)</label>
+                            <label><input type="checkbox" name="taper"> Taper (Hann 5%)</label>
+                            <label><input type="checkbox" name="integrate"> Integrate</label>
+                            <label><input type="checkbox" name="differentiate"> Differentiate</label>
+                        </div>
+
+                        <!-- Filter -->
+                        <div style="flex: 1; min-width: 200px;">
+                            <h4>Filter (Bandpass)</h4>
+                            <div style="display: flex; gap: 5px; align-items: center;">
+                                <input type="number" step="any" name="freqmin" placeholder="Freq Min (Hz)"
+                                    style="width: 100px;">
+                                <span>-</span>
+                                <input type="number" step="any" name="freqmax" placeholder="Freq Max (Hz)"
+                                    style="width: 100px;">
+                            </div>
+                        </div>
+
+                        <!-- Rotation -->
+                        <div style="flex: 1; min-width: 200px;">
+                            <h4>Horizontal Rotation</h4>
+                            <label><input type="checkbox" name="rotate"> Rotate N/E to R/T</label>
+                            <div style="margin-top: 5px;">
+                                <input type="number" step="any" name="baz" placeholder="Back Azimuth (deg)"
+                                    style="width: 150px;">
+                            </div>
+                            <small class="text-muted">Requires N and E components.</small>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-secondary" style="margin-top: 15px;">Apply Processing to All
+                        Files</button>
+                </form>
+            </div>
+            {% endif %}
+
             <!-- Upload Section (Moved inside tab) -->
             <div class="panel" style="margin-top: 20px;">
                 <h3>Upload New File</h3>
                 <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
                     <div class="form-group">
-                        <label for="waveform_file">Waveform File (MSEED/SAC):</label>
-                        <input type="file" name="waveform_file" id="waveform_file" required>
+                        <label for="waveform_file">Waveform Files (MSEED/SAC):</label>
+                        <input type="file" name="waveform_files" id="waveform_file" multiple required>
                     </div>
                     <button type="submit" class="btn">Upload & Start</button>
                 </form>
@@ -442,8 +488,573 @@
             </div>
         </div>
 
+        <!-- Deconvolution Tab -->
+        <div id="Deconvolution" class="tab-content"
+            style="display: {% if active_tab == 'deconvolution' %}block{% else %}none{% endif %}; margin-top: 20px;">
+
+            <div class="row">
+                <div class="col" style="flex: 0 0 400px;">
+                    <!-- Upload -->
+                    <div class="panel">
+                        <h3>Files</h3>
+                        <form action="{{ url_for('deconv_upload') }}" method="post" enctype="multipart/form-data">
+                            <div class="form-group">
+                                <label>Select Signals (MSEED/SAC):</label>
+                                <input type="file" name="deconv_files" multiple required>
+                            </div>
+                            <button type="submit" class="btn">Upload Files</button>
+                        </form>
+                    </div>
+
+                    {% if files_info %}
+                    <!-- Congifuration -->
+                    <div class="panel">
+                        <h3>Configuration</h3>
+                        <form action="{{ url_for('deconv_process') }}" method="post">
+                            <div style="max-height: 400px; overflow-y: auto;">
+                                {% for file in files_info %}
+                                <div style="border-bottom:1px solid #eee; padding-bottom:10px; margin-bottom:10px;">
+                                    <strong>{{ file.filename }}</strong><br>
+                                    <small>{{ file.station }}.{{ file.channel }}</small>
+
+                                    <div style="margin-top:5px;">
+                                        <label>Role:</label>
+                                        <label style="font-weight:normal;"><input type="radio"
+                                                name="role_{{ file.filename }}" value="reference" required>
+                                            Reference</label>
+                                        <label style="font-weight:normal;"><input type="radio"
+                                                name="role_{{ file.filename }}" value="interest" checked>
+                                            Interest</label>
+                                        <!-- <label style="font-weight:normal;"><input type="radio" name="role_{{ file.filename }}" value="ignore"> Ignore</label> -->
+                                    </div>
+
+                                    <div style="margin-top:5px;">
+                                        <label>Depth / Height (m):</label>
+                                        <input type="number" step="any" name="depth_{{ file.filename }}" value="0"
+                                            required style="width: 80px;">
+                                    </div>
+
+                                    <div style="margin-top:5px;">
+                                        <label>Type:</label>
+                                        <select name="type_{{ file.filename }}" style="width:100px;">
+                                            <option value="borehole">Borehole</option>
+                                            <option value="building">Building</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+
+                            <div style="margin-top:10px; border-top:1px solid #eee; padding-top:10px;">
+                                <label for="amp_factor"><strong>Plot Amplification:</strong></label>
+                                <input type="number" step="0.1" name="amp_factor" id="amp_factor" value="1.0" min="0.1"
+                                    max="50.0" style="width: 80px;">
+                                <br>
+                                <label style="margin-top:5px;"><strong>Parameters:</strong></label>
+                                <div style="margin-left: 10px;">
+                                    <div style="margin-bottom: 3px;">
+                                        <span style="display:inline-block; width: 50px;"><strong>dstack:</strong></span>
+                                        <input type="number" name="dstack" placeholder="1" value="1"
+                                            style="width: 70px;"
+                                            title="Duration of the deconvolved signal to stack (in [sec])">
+                                        <small style="color:#666;">Duration of stack [s]</small>
+                                    </div>
+                                    <div style="margin-bottom: 3px;">
+                                        <span style="display:inline-block; width: 50px;"><strong>r:</strong></span>
+                                        <input type="number" step="0.1" name="r" placeholder="2" value="2"
+                                            style="width: 70px;"
+                                            title="Factor of signal resampling for better peak picking (signal * r)">
+                                        <small style="color:#666;">Resampling factor</small>
+                                    </div>
+                                    <div style="margin-bottom: 3px;">
+                                        <span style="display:inline-block; width: 50px;"><strong>sp:</strong></span>
+                                        <input type="number" step="0.1" name="sp" placeholder="1" value="1"
+                                            style="width: 70px;" title="Spectral PErcentage">
+                                        <small style="color:#666;">Spectral %</small>
+                                    </div>
+                                </div>
+                                <br>
+                                <label style="margin-top:5px;"><strong>Time Axis Limits [s]:</strong></label>
+                                <input type="number" step="0.1" name="t_min" placeholder="Min (Auto)"
+                                    style="width: 90px;">
+                                <input type="number" step="0.1" name="t_max" placeholder="Max (Auto)"
+                                    style="width: 90px;">
+                            </div>
+
+                            <button type="submit" class="btn" style="width:100%; margin-top:10px;">Process
+                                Deconvolution</button>
+                        </form>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <div class="col">
+                    <!-- Results -->
+                    {% if has_results %}
+
+                    <div class="panel">
+                        <h3>Results</h3>
+                        <p><strong>Estimated Vs:</strong> {{ vs_estimate }}</p>
+                        <a href="{{ url_for('deconv_download_csv') }}" class="btn btn-secondary">Download Results
+                            (CSV)</a>
+                    </div>
+
+                    <div class="plot-container">
+                        <h3>Deconvolved Signals</h3>
+                        {% if deconv_plot_url %}
+                        <img id="img_deconv" src="data:image/png;base64,{{ deconv_plot_url }}" alt="Deconvolution Plot">
+                        <br>
+                        <button class="btn btn-secondary" style="margin-top:10px;"
+                            onclick="downloadImage('img_deconv', 'deconvolution_plot.png')">Download Image</button>
+                        {% endif %}
+                    </div>
+
+                    <div class="plot-container" style="margin-top:20px;">
+                        <h3>Model Sketch</h3>
+                        {% if sketch_url %}
+                        <img id="img_sketch_deconv" src="data:image/png;base64,{{ sketch_url }}" alt="Station Sketch">
+                        <br>
+                        <button class="btn btn-secondary" style="margin-top:10px;"
+                            onclick="downloadImage('img_sketch_deconv', 'station_sketch.png')">Download Image</button>
+                        {% endif %}
+                    </div>
+
+                    <div class="plot-container" style="margin-top:20px;">
+                        <h3>Velocity Regression</h3>
+                        {% if reg_url %}
+                        <img id="img_reg" src="data:image/png;base64,{{ reg_url }}" alt="Velocity Regression">
+                        <br>
+                        <button class="btn btn-secondary" style="margin-top:10px;"
+                            onclick="downloadImage('img_reg', 'velocity_regression.png')">Download Image</button>
+                        {% endif %}
+                    </div>
+
+                    {% else %}
+                    <div class="alert alert-info">
+                        Upload files and configure stations to see results.
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="plot-container" style="margin-top:20px;">
+                <h3>Interactive Selector</h3>
+                <p>Click on waveform to pick peaks. Toggle Mode below.</p>
+
+                <div style="margin-top:10px; margin-bottom:10px;">
+                    <label><strong>Picking Mode:</strong></label>
+                    <label><input type="radio" name="pick_mode" value="auto" checked> Auto (Time &gt; 0 Causal)</label>
+                    <label><input type="radio" name="pick_mode" value="causal"> Force Causal</label>
+                    <label><input type="radio" name="pick_mode" value="acausal"> Force Acausal</label>
+                </div>
+
+                <div style="margin-top:10px; margin-bottom:10px;">
+                    <label><strong>Amplification:</strong></label>
+                    <input type="range" id="js_amp" min="0.1" max="50" step="0.1" value="1.0" style="width:200px;"
+                        oninput="updateAmpFromSlider(this.value)">
+                    <input type="number" id="js_amp_num" step="0.1" min="0.1" max="50" value="1.0" style="width:70px;"
+                        oninput="updateAmpFromBox(this.value)">
+                </div>
+
+                <div style="position: relative; display: inline-block;">
+                    <canvas id="deconvCanvas" width="800" height="600"
+                        style="border:1px solid #ccc; cursor:crosshair;"></canvas>
+                </div>
+
+                <div style="margin-top:10px;">
+                    <button class="btn btn-secondary" onclick="resetPicks()">Reset Picks</button>
+                    <button class="btn" onclick="fitLines()">Recalculate Vs</button>
+                </div>
+
+                <div id="js_vs_result" style="margin-top:10px; font-weight:bold; white-space: pre-wrap;"></div>
+            </div>
+        </div>
+
     </div>
 
+
+
+    <!-- Data Injection -->
+    <script>
+        var resultData = {{ results_json | default ('null') | safe }};
+        // Note: Jinja tojson might quote it string. If app passed json string manually, just safe.
+        // Assuming app passed `results_json` as a JSON string.
+        if (typeof resultData === 'string') {
+            resultData = JSON.parse(resultData);
+        }
+
+        var canvas = document.getElementById('deconvCanvas');
+        var ctx = canvas.getContext('2d');
+        var width = canvas.width;
+        var height = canvas.height;
+
+        // State
+        var amp = 1.0;
+        var picks = []; // Stores {id: , causal: t, acausal: t}
+
+        // Initialize Picks from Backend
+        if (resultData && resultData.stations) {
+            resultData.stations.forEach(st => {
+                picks.push({
+                    id: st.id,
+                    causal: st.peak_causal, // time
+                    acausal: st.peak_acausal // time
+                });
+            });
+            draw();
+            fitLines(); // Initial Calc
+        }
+
+        function updateAmpFromSlider(val) {
+            amp = parseFloat(val);
+            document.getElementById('js_amp_num').value = amp;
+            draw();
+        }
+
+        function updateAmpFromBox(val) {
+            amp = parseFloat(val);
+            document.getElementById('js_amp').value = amp;
+            draw();
+        }
+
+        function resetPicks() {
+            // Reset to backend values or clear? Let's reset to backend
+            picks = [];
+            if (resultData && resultData.stations) {
+                resultData.stations.forEach(st => {
+                    picks.push({
+                        id: st.id,
+                        causal: st.peak_causal,
+                        acausal: st.peak_acausal
+                    });
+                });
+            }
+            draw();
+            fitLines();
+        }
+
+        // Click Handler
+        canvas.addEventListener('mousedown', function (e) {
+            var rect = canvas.getBoundingClientRect();
+            var mx = e.clientX - rect.left;
+            var my = e.clientY - rect.top;
+
+            // 1. Find closest station by Y (depth)
+            // Need coordinate mapping first.
+            var mapping = getMapping();
+
+            // Find closest station depth
+            var closestDist = Infinity;
+            var closestStationIdx = -1;
+
+            resultData.stations.forEach((st, idx) => {
+                // Approximate Y of the station baseline (signal = 0)
+                var y_base = mapping.mapY(st.depth);
+                var dist = Math.abs(my - y_base);
+                if (dist < closestDist) {
+                    closestDist = dist;
+                    closestStationIdx = idx;
+                }
+            });
+
+            // Threshold for click Y? Maybe loose.
+            if (closestStationIdx !== -1) {
+                // 2. Map X to time
+                var t = mapping.mapXInv(mx);
+
+                // Determine Mode
+                var mode = document.querySelector('input[name="pick_mode"]:checked').value;
+                var isCausal = false;
+
+                if (mode === 'auto') {
+                    isCausal = t >= 0;
+                } else {
+                    isCausal = (mode === 'causal');
+                }
+
+                // snap to peak?
+                // Find signal max in window around t?
+                // Let's implement Snap-to-Peak in range e.g. +/- 5% of View
+                // actually map t to index
+                var timeArr = resultData.time;
+                // assuming linear time
+                var dt = timeArr[1] - timeArr[0];
+                var idx = Math.round((t - timeArr[0]) / dt);
+
+                // Search window: e.g. 20 samples
+                var w = 20;
+                var start = Math.max(0, idx - w);
+                var end = Math.min(timeArr.length - 1, idx + w);
+
+                var sig = resultData.stations[closestStationIdx].signal;
+
+                // Find local max abs in window
+                var bestIdx = idx;
+                var maxVal = -1;
+
+                // If just clicking, user probably wants exact point or peak. Peak is better.
+                for (var i = start; i <= end; i++) {
+                    if (Math.abs(sig[i]) > maxVal) {
+                        maxVal = Math.abs(sig[i]);
+                        bestIdx = i;
+                    }
+                }
+
+                var pickedTime = timeArr[bestIdx];
+
+                // Update Pick
+                var stId = resultData.stations[closestStationIdx].id;
+                var pObj = picks.find(p => p.id == stId);
+
+                if (isCausal) pObj.causal = pickedTime;
+                else pObj.acausal = pickedTime;
+
+                draw();
+                fitLines();
+            }
+        });
+
+        function getMapping() {
+            // Find bounds
+            var depths = resultData.stations.map(s => s.depth);
+            var minD = Math.min(...depths);
+            var maxD = Math.max(...depths);
+
+            // Add padding
+            var dPad = (maxD - minD) * 0.1 || 5;
+            // Plot Y range: Min-Pad to Max+Pad?
+            // Actually, usually negative depth is top...
+            // Standard plot: Y axis increases downwards?
+            // Math axes: Y increases upwards.
+            // HTML Canvas: Y increases downwards.
+            // Let's map minD to Bottom, maxD to Top?
+            // If depths are negative (borehole), maxD is closest to 0 (top).
+            // So MaxD -> Top (low Y pixel), MinD -> Bottom (high Y pixel).
+
+            var yMin = minD - dPad;
+            var yMax = maxD + dPad;
+
+            var tMin = (resultData.t_min != null) ? resultData.t_min : resultData.time[0];
+            var tMax = (resultData.t_max != null) ? resultData.t_max : resultData.time[resultData.time.length - 1];
+
+            var margin = 40;
+            var w = width - 2 * margin;
+            var h = height - 2 * margin;
+
+            function mapX(t) {
+                return margin + ((t - tMin) / (tMax - tMin)) * w;
+            }
+
+            function mapY(d) {
+                // d: world Y.
+                // map d to canvas Y.
+                // yMax -> margin (Top)
+                // yMin -> margin + h (Bottom)
+                return margin + h - ((d - yMin) / (yMax - yMin)) * h;
+            }
+
+            function mapXInv(pix) {
+                return tMin + ((pix - margin) / w) * (tMax - tMin);
+            }
+
+            return { mapX, mapY, mapXInv, yMin, yMax, tMin, tMax, margin, w, h };
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, width, height);
+
+            if (!resultData) return;
+
+            var mapping = getMapping();
+            var mapX = mapping.mapX;
+            var mapY = mapping.mapY;
+
+            // Draw Grid/Axes
+            ctx.strokeStyle = '#eee';
+            ctx.lineWidth = 1;
+            ctx.font = '10px sans-serif';
+            ctx.fillStyle = 'black';
+
+            // Vertical Grid (Time)
+            var numTicks = 10;
+            var dt = (mapping.tMax - mapping.tMin) / numTicks;
+            for (var i = 0; i <= numTicks; i++) {
+                var t = mapping.tMin + i * dt;
+                var x = mapX(t);
+                ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+                ctx.textAlign = 'center';
+                ctx.fillText(t.toFixed(2), x, height - 5);
+            }
+
+            // Draw Zero Line specifically
+            if (0 >= mapping.tMin && 0 <= mapping.tMax) {
+                var x0 = mapX(0);
+                ctx.strokeStyle = '#ccc';
+                ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0, height); ctx.stroke();
+            }
+
+            // Horizontal Grid (Stations) represents Depth/Structure
+            ctx.strokeStyle = '#eee';
+            resultData.stations.forEach(st => {
+                var y = mapY(st.depth);
+                ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+            });
+
+            // Axes Borders
+            ctx.strokeStyle = '#000';
+            ctx.strokeRect(mapping.margin, mapping.margin, mapping.w, mapping.h);
+
+            // Labels
+            ctx.save();
+            ctx.translate(10, height / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.textAlign = 'center';
+            ctx.fillText("Sensor Offset [m]", 0, 0);
+            ctx.restore();
+
+            ctx.fillText("Time [s]", width / 2, height - 20);
+
+            resultData.stations.forEach((st, stIdx) => {
+                var baseY = mapY(st.depth);
+
+                // Draw Signal
+                ctx.beginPath();
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 1;
+
+                var sig = st.signal;
+                // Normalize sig locally or globally?
+                // Backend used local norm. Let's do local norm here.
+                var maxS = Math.max(...sig.map(Math.abs));
+                if (maxS == 0) maxS = 1;
+
+                // Scale factor for display height? 
+                // Let's say max amplitude is 10% of total height? or fixed pixels?
+                // Let's say 1 unit of normalized signal = some plotted height.
+                // let's try to fit traces without too much overlap but some is ok.
+                // Spacing avg?
+                var spacing = (mapping.yMax - mapping.yMin) / (resultData.stations.length || 1); // world units
+                // map spacing to pixels?
+                // Or just use a fixed pixel scale * amp.
+                var scale = 30 * amp; // 30 pixels for normalized 1.0 * amp
+
+                for (var i = 0; i < resultData.time.length; i++) {
+                    var t = resultData.time[i];
+                    var s = sig[i] / maxS;
+
+                    var px = mapX(t);
+                    var py = baseY - s * scale; // Minus because Y up is minus
+
+                    if (i == 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+
+                // Fill Posisitve? Complex in canvas path unless constructed carefully.
+                // Skipping fill for simplicity in JS for now or simple fill area.
+
+                // Draw ID
+                ctx.fillStyle = 'black';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(st.id, mapX(mapping.tMin) - 5, baseY);
+
+                // Draw Picks
+                var pObj = picks.find(p => p.id == st.id);
+                if (pObj.causal != null) {
+                    var px = mapX(pObj.causal);
+                    // Calculate value at pick roughly? Or just place on line?
+                    // Let's place circle at Y = baseY
+                    ctx.fillStyle = 'red';
+                    ctx.beginPath(); ctx.arc(px, baseY, 3, 0, 2 * Math.PI); ctx.fill();
+                }
+                if (pObj.acausal != null) {
+                    var px = mapX(pObj.acausal);
+                    ctx.fillStyle = 'blue';
+                    ctx.beginPath(); ctx.arc(px, baseY, 3, 0, 2 * Math.PI); ctx.fill();
+                }
+            });
+
+            // Draw Trajectories
+            // Collect points
+            var cPts = [];
+            var acPts = [];
+            picks.forEach(p => {
+                var depth = resultData.stations.find(s => s.id == p.id).depth;
+                if (p.causal != null) cPts.push({ t: p.causal, d: depth });
+                if (p.acausal != null) acPts.push({ t: p.acausal, d: depth });
+            });
+
+            cPts.sort((a, b) => a.d - b.d);
+            acPts.sort((a, b) => a.d - b.d);
+
+            ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+            ctx.beginPath();
+            cPts.forEach((pt, i) => {
+                var px = mapX(pt.t);
+                var py = mapY(pt.d);
+                if (i == 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            });
+            ctx.stroke();
+
+            ctx.strokeStyle = 'rgba(0, 0, 255, 0.5)';
+            ctx.beginPath();
+            acPts.forEach((pt, i) => {
+                var px = mapX(pt.t);
+                var py = mapY(pt.d);
+                if (i == 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            });
+            ctx.stroke();
+        }
+
+        function fitLines() {
+            // JS Linear Regression
+            // y = mx + c -> t = s * d + i
+
+            var output = "";
+
+            // Causal
+            var cPts = picks.filter(p => p.causal != null).map(p => {
+                return { d: resultData.stations.find(s => s.id == p.id).depth, t: p.causal };
+            });
+
+            if (cPts.length > 1) {
+                var res = linearRegression(cPts.map(p => p.d), cPts.map(p => p.t));
+                var vs = (1.0 / Math.abs(res.slope)).toFixed(2);
+                output += "Causal Vs: " + vs + " m/s\n";
+            }
+
+            // Acausal
+            var acPts = picks.filter(p => p.acausal != null).map(p => {
+                return { d: resultData.stations.find(s => s.id == p.id).depth, t: p.acausal };
+            });
+
+            if (acPts.length > 1) {
+                var res = linearRegression(acPts.map(p => p.d), acPts.map(p => p.t));
+                var vs = (1.0 / Math.abs(res.slope)).toFixed(2);
+                output += "Acausal Vs: " + vs + " m/s";
+            }
+
+            document.getElementById('js_vs_result').innerText = output;
+        }
+
+        function linearRegression(x, y) {
+            var n = x.length;
+            var sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+            for (var i = 0; i < n; i++) {
+                sumX += x[i];
+                sumY += y[i];
+                sumXY += x[i] * y[i];
+                sumXX += x[i] * x[i];
+            }
+            var slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+            var intercept = (sumY - slope * sumX) / n;
+            return { slope: slope, intercept: intercept };
+        }
+
+    </script>
     <script>
         function downloadImage(imgId, filename) {
             var img = document.getElementById(imgId);
@@ -526,7 +1137,7 @@
         <input type="number" step="any" name="s_qs" placeholder="Q" value="500" required oninput="syncDamping(this)">
         <input type="number" step="any" name="s_damping" placeholder="Damping" oninput="syncQ(this)">
         <button type="button" class="btn btn-danger" onclick="removeLayer(this)" style="padding: 0 10px;">X</button>
-    `;
+        `;
 
             // Insert before the last element (halfspace)
             container.insertBefore(div, container.lastElementChild);

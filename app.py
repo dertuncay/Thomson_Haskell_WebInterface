@@ -12,6 +12,7 @@ import obspy
 from obspy.core import read, Stream
 from obspy.core.inventory import read_inventory
 import numpy as np
+import funcs
 
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'
@@ -138,6 +139,10 @@ def index():
     spectrum_url = None
     current_info = None
     history = session.get('history', [])
+    active_tab = request.args.get('tab', 'waveform')
+    # Retrieve file info from session
+    # Now valid for both Waveform and Deconv since we unified it
+    files_info = session.get('deconv_files_info', [])
     
     if history:
         filepath = get_current_file_path()
@@ -168,41 +173,100 @@ def index():
             except Exception as e:
                 flash(f"Error reading file: {e}")
 
-    return render_template('index.html', plot_url=plot_url, spectrum_url=spectrum_url, current_info=current_info)
+    return render_template('index.html', 
+                           plot_url=plot_url, 
+                           spectrum_url=spectrum_url, 
+                           current_info=current_info, 
+                           active_tab=active_tab,
+                           files_info=files_info)
 
 @app.route('/upload', methods=['POST'])
 def upload():
-    if 'waveform_file' not in request.files:
-        flash('No file part')
-        return redirect(url_for('index'))
-    
-    file = request.files['waveform_file']
-    if file.filename == '':
+    # Allow 'waveform_files' (multiple) or fallback to 'waveform_file'
+    files = request.files.getlist('waveform_files')
+    if not files and 'waveform_file' in request.files:
+        files = [request.files['waveform_file']]
+
+    if not files or files[0].filename == '':
         flash('No selected file')
         return redirect(url_for('index'))
 
-    if file:
-        # Reset session for new upload
-        session['history'] = []
-        folder = get_session_folder()
-        
-        # Clean folder
-        for f in os.listdir(folder):
-            os.remove(os.path.join(folder, f))
+    # Reset session for new upload
+    session['history'] = []
+    folder = get_session_folder()
+    
+    # We will use 'deconv' subfolder for everything now? Or just main folder?
+    # The requirement says "use data given in Waveform Processing tab".
+    # Waveform Processing tab usually works on ONE active file at a time (for viewing).
+    # But for Deconvolution we need multiple.
+    # Let's clean the folder and save ALL files there.
+    # And maybe set the FIRST file as the "Active" one for the Waveform View.
 
-        filepath = os.path.join(folder, file.filename)
-        file.save(filepath)
-        
+    # Clean folder
+    for f in os.listdir(folder):
+        if os.path.isdir(os.path.join(folder, f)):
+             shutil.rmtree(os.path.join(folder, f))
+        else:
+             os.remove(os.path.join(folder, f))
+    
+    # Re-create deconv folder structure if needed? 
+    # Actually, deconv logic used 'deconv' subfolder. 
+    # Let's decide: Use the MAIN session folder for everything.
+    # But wait, deconv_preprocess used 'deconv' subfolder.
+    # Let's conform to one place. Let's use the MAIN folder.
+    # But verifying existing logic...
+    # `get_deconv_folder` creates/gets `folder/deconv`.
+    
+    # Let's save files to `folder/deconv` AND maybe strictly copy the first one to `folder/` for the Waveform Viewer?
+    # Or just save to `folder/deconv` and have everything look there.
+    # But Waveform Viewer (Action route) expects `get_current_file_path()`.
+    
+    # Let's keep it simple:
+    # 1. Save all files to `folder/deconv` (so Deconv works).
+    # 2. ALSO save the first file to `folder/` as the "Active Waveform".
+    
+    deconv_folder = os.path.join(folder, 'deconv')
+    os.makedirs(deconv_folder, exist_ok=True)
+    
+    saved_files_info = []
+    first_file_path = None
+    
+    for file in files:
+        if file and file.filename:
+            path = os.path.join(deconv_folder, file.filename)
+            file.save(path)
+            
+            # If it's the first one, copy to root for Waveform Viewer
+            if first_file_path is None:
+                first_file_path = os.path.join(folder, file.filename)
+                shutil.copy(path, first_file_path)
+            
+            # Collect Info
+            try:
+                st = read(path)
+                tr = st[0]
+                saved_files_info.append({
+                    'filename': file.filename,
+                    'id': tr.id,
+                    'stats': str(tr.stats)
+                })
+            except Exception as e:
+                print(f"Error reading {file.filename}: {e}")
+
+    # Set session info
+    saved_files_info.sort(key=lambda x: x['filename'])
+    session['deconv_files_info'] = saved_files_info # Re-use this key so Deconv UI works automatically
+    
+    # Initialize Waveform Viewer with the first file
+    if first_file_path:
         try:
-            st = read(filepath)
+            st = read(first_file_path)
             domains = infer_domains(st)
-            
-            # Save as first step
-            save_new_step(st, f"Uploaded {file.filename}", domains)
-            session.modified = True
+            save_new_step(st, f"Uploaded {len(files)} files", domains)
         except Exception as e:
-            flash(f"Error processing upload: {e}")
+            flash(f"Error processing first file: {e}")
             
+    session.modified = True
     return redirect(url_for('index'))
 
 @app.route('/action', methods=['POST'])
@@ -398,9 +462,678 @@ def reset():
     
     return redirect(url_for('index'))
 
-# --- Thomson-Haskell Section ---
-from thomson_haskell import thomson_haskell_transfer_function
+@app.route('/deconv_preprocess', methods=['POST'])
+def deconv_preprocess():
+    folder = get_session_folder()
+    deconv_folder = os.path.join(folder, 'deconv')
+    if not os.path.exists(deconv_folder):
+         os.makedirs(deconv_folder)
+         
+    processing_list = os.listdir(deconv_folder)
+    
+    # Get parameters
+    do_detrend = 'detrend' in request.form
+    do_taper = 'taper' in request.form
+    do_integrate = 'integrate' in request.form
+    do_differentiate = 'differentiate' in request.form
+    
+    freqmin = request.form.get('freqmin')
+    freqmax = request.form.get('freqmax')
+    freqmin = float(freqmin) if freqmin else None
+    freqmax = float(freqmax) if freqmax else None
+    
+    do_rotate = 'rotate' in request.form
+    baz = request.form.get('baz')
+    baz = float(baz) if baz else None
+    
+    # 1. Standard Processing
+    for fname in processing_list:
+        filepath = os.path.join(deconv_folder, fname)
+        try:
+            st = read(filepath)
+            modified = False
+            
+            if do_detrend:
+                st.detrend("linear")
+                st.detrend("demean")
+                modified = True
+                
+            if do_taper:
+                st.taper(max_percentage=0.05, type="hann")
+                modified = True
+                
+            if freqmin and freqmax:
+                st.filter("bandpass", freqmin=freqmin, freqmax=freqmax)
+                modified = True
+            elif freqmin:
+                st.filter("highpass", freq=freqmin)
+                modified = True
+            elif freqmax:
+                st.filter("lowpass", freq=freqmax)
+                modified = True
+                
+            if do_integrate:
+                st.integrate()
+                modified = True
+                
+            if do_differentiate:
+                st.differentiate()
+                modified = True
+                
+            if modified:
+                st.write(filepath, format='MSEED') # Overwrite
+                
+        except Exception as e:
+            print(f"Error processing {fname}: {e}")
+            
+    # 2. Rotation
+    if do_rotate and baz is not None:
+        # Group by station
+        stations = {}
+        # Refresh list in case of changes? (filenames are same)
+        processing_list = os.listdir(deconv_folder)
+        
+        for fname in processing_list:
+            try:
+                st = read(os.path.join(deconv_folder, fname))
+                tr = st[0]
+                net = tr.stats.network
+                sta = tr.stats.station
+                loc = tr.stats.location
+                # Key: Net.Sta.Loc
+                key = f"{net}.{sta}.{loc}"
+                if key not in stations:
+                    stations[key] = []
+                stations[key].append(fname)
+            except:
+                continue
+                
+        # Iterate groups and rotate
+        for key, fnames in stations.items():
+            # Find N and E
+            n_file = None
+            e_file = None
+            
+            for f in fnames:
+                # Check Last char of component code? Or try to verify orientation?
+                # Assuming channel codes end with N or E (or 1 or 2)
+                # Let's read header
+                st = read(os.path.join(deconv_folder, f))
+                chan = st[0].stats.channel
+                if chan.endswith('N') or chan.endswith('1'):
+                    n_file = f
+                elif chan.endswith('E') or chan.endswith('2'):
+                    e_file = f
+            
+            if n_file and e_file:
+                try:
+                    st_n = read(os.path.join(deconv_folder, n_file))
+                    st_e = read(os.path.join(deconv_folder, e_file))
+                    
+                    # Merge into one stream for rotation
+                    st_rot = st_n + st_e
+                    
+                    # Rotate NE -> RT
+                    # obspy rotate method: method='NE->RT', back_azimuth=baz
+                    st_rot.rotate(method='NE->RT', back_azimuth=baz)
+                    
+                    # Separation
+                    tr_r = st_rot.select(component='R')[0]
+                    tr_t = st_rot.select(component='T')[0]
+                    
+                    # Save R and T
+                    # Construct new filenames? Or Overwrite N->R, E->T?
+                    # Safer to create new and remove old or rename?
+                    # Let's rename to keep list clean? 
+                    # N -> R
+                    r_fname = n_file.replace(st_n[0].stats.channel, tr_r.stats.channel)
+                    # If filename doesn't have channel, append _R?
+                    if r_fname == n_file:
+                         r_fname = n_file + "_R"
+                         
+                    t_fname = e_file.replace(st_e[0].stats.channel, tr_t.stats.channel)
+                    if t_fname == e_file:
+                         t_fname = e_file + "_T"
 
+                    tr_r.write(os.path.join(deconv_folder, r_fname), format='MSEED')
+                    tr_t.write(os.path.join(deconv_folder, t_fname), format='MSEED')
+                    
+                    # Remove original N/E files if filenames are different
+                    if r_fname != n_file:
+                        os.remove(os.path.join(deconv_folder, n_file))
+                    if t_fname != e_file:
+                        os.remove(os.path.join(deconv_folder, e_file))
+                        
+                except Exception as e:
+                    print(f"Error rotating {key}: {e}")
+
+    # Re-scan folder to update session list
+    files_info = []
+    for f in os.listdir(deconv_folder):
+        try:
+            st = read(os.path.join(deconv_folder, f))
+            tr = st[0]
+            files_info.append({
+                'filename': f,
+                'id': tr.id,
+                'stats': str(tr.stats)
+            })
+        except:
+            pass
+            
+    files_info.sort(key=lambda x: x['filename'])
+    session['deconv_files_info'] = files_info
+    session.modified = True
+    
+    flash("Preprocessing completed.")
+    return redirect(url_for('index', tab='deconvolution'))
+
+@app.route('/deconv_upload', methods=['POST'])
+def deconv_upload():
+    if 'deconv_files' not in request.files:
+        flash('No files part')
+        return redirect(url_for('index', tab='deconvolution'))
+    
+    files = request.files.getlist('deconv_files')
+    if not files or files[0].filename == '':
+        flash('No selected files')
+        return redirect(url_for('index', tab='deconvolution'))
+
+    # Setup session
+    folder = get_session_folder()
+    deconv_folder = os.path.join(folder, 'deconv')
+    os.makedirs(deconv_folder, exist_ok=True)
+    
+    # Clear previous deconv files? Maybe yes to keep it simple.
+    for f in os.listdir(deconv_folder):
+        os.remove(os.path.join(deconv_folder, f))
+        
+    uploaded_files_info = []
+    
+    for file in files:
+        if file:
+            filepath = os.path.join(deconv_folder, file.filename)
+            file.save(filepath)
+            
+            # Read metadata
+            try:
+                st = read(filepath)
+                # Use first trace for metadata
+                tr = st[0]
+                uploaded_files_info.append({
+                    'filename': file.filename,
+                    'station': tr.stats.station,
+                    'channel': tr.stats.channel,
+                    'id': tr.id,
+                    'npts': tr.stats.npts,
+                    'sr': tr.stats.sampling_rate
+                })
+            except Exception as e:
+                flash(f"Error reading {file.filename}: {e}")
+
+    session['deconv_files_info'] = uploaded_files_info
+    return redirect(url_for('index', tab='deconvolution'))
+
+@app.route('/deconv_process', methods=['POST'])
+def deconv_process():
+    folder = get_session_folder()
+    deconv_folder = os.path.join(folder, 'deconv')
+    files_info = session.get('deconv_files_info', [])
+    
+    if not files_info:
+        flash("No files uploaded for deconvolution.")
+        return redirect(url_for('index', tab='deconvolution'))
+
+    # Parse Form Data
+    # roles: dict {filename: 'ref' | 'interest' | 'ignore'}
+    # depths: dict {filename: float}
+    # types: dict {filename: 'borehole' | 'building'}
+    
+    ref_file = None
+    interests = []
+    
+    station_configs = {}
+    
+    for info in files_info:
+        fname = info['filename']
+        role = request.form.get(f"role_{fname}")
+        depth = float(request.form.get(f"depth_{fname}", 0.0))
+        st_type = request.form.get(f"type_{fname}", "borehole")
+        
+        station_configs[fname] = {
+            'role': role,
+            'depth': depth,
+            'type': st_type,
+            'stats': info
+        }
+        
+        if role == 'reference':
+            ref_file = fname
+        elif role == 'interest':
+            interests.append(fname)
+            
+    if not ref_file:
+        flash("Please select exactly one Reference station.")
+        return redirect(url_for('index', tab='deconvolution'))
+        
+    if not interests:
+        flash("Please select at least one Station of Interest.")
+        return redirect(url_for('index', tab='deconvolution'))
+
+    try:
+        # Load Reference
+        st_ref = read(os.path.join(deconv_folder, ref_file))
+        tr_ref = st_ref[0]
+        npts_ref = tr_ref.stats.npts
+        sr_ref = tr_ref.stats.sampling_rate
+        
+        # Calculate FFT of Reference
+        fft_ref, freqs_ref = funcs.calc_fft(tr_ref.data, npts_ref, sr_ref)
+        
+        results = []
+        
+        # Prepare Plot
+        img_deconv = io.BytesIO()
+        fig_deconv, ax = plt.subplots(figsize=(10, 8))
+        
+        # Prepare Data for CSV
+        # We need a common time axis. If SR and NPTS are same, simple.
+        # If not, we might have issues. Assuming sameness for MVP.
+        csv_data = {}
+        
+        # Vs Estimation Data
+        vs_data_points = [] # (depth, time_of_peak)
+        
+        # Process Ref (Just to place it on plot? usually Ref starts at 0 time lag?)
+        # Actually usually we look at Interest relative to Ref.
+        # But maybe we want to plot Ref too (Autocorrelation)? 
+        # User said: "Plot deconvolved signals for all the stations".
+        # Let's include Reference (Auto-deconvolution -> Impulse).
+        
+        processing_list = [ref_file] + interests
+        
+        # Sort by depth for better plotting?
+        processing_list.sort(key=lambda x: station_configs[x]['depth']) # Sort by depth (ascending? 0 at top?)
+        # Usually building is negative depth (upwards)? Or positive height?
+        # User prompt: "Ask if they are in a borehole or on a building."
+        # User defined depth.
+        # Let's plot Height on Y axis.
+        # If borehole, depth 0 is surface, positive depth is down.
+        # If building, depth 0 is ground, height is up?
+        # Let's use the provided "Depth" as Y-axis value.
+        
+        max_time = 0
+        common_times = None
+        
+        for fname, cfg in station_configs.items():
+            if cfg['type'] == 'borehole' and cfg['depth'] > 0:
+                # Force negative depth for borehole if user entered positive
+                # Assuming standard: Borehole depths are down (negative Y for plot)
+                station_configs[fname]['depth'] = -abs(cfg['depth'])
+                
+        # Sort processing list by depth (bottom to top for plot)
+        processing_list = [ref_file] + interests
+        processing_list.sort(key=lambda x: station_configs[x]['depth'])
+        
+        common_times = None
+        
+        common_times = None
+        # Parse Parameters
+        try:
+            dstack = float(request.form.get('dstack', 10))
+        except:
+            dstack = 10
+            
+        try:
+            r_val = float(request.form.get('r', 1))
+        except:
+            r_val = 1
+            
+        try:
+            sp_val = float(request.form.get('sp', 1))
+        except:
+            sp_val = 1
+            
+        # Parse Amplification and Limits
+        amp_factor = float(request.form.get('amp_factor', 1.0))
+        t_min_str = request.form.get('t_min')
+        t_max_str = request.form.get('t_max')
+        
+        t_min = float(t_min_str) if t_min_str else None
+        t_max = float(t_max_str) if t_max_str else None
+            
+        causal_points = [] # t >= 0
+        acausal_points = [] # t < 0
+        
+        for fname in processing_list:
+            st_int = read(os.path.join(deconv_folder, fname))
+            tr_int = st_int[0]
+            
+            if tr_int.stats.sampling_rate != sr_ref:
+                continue
+                
+            fft_int, _ = funcs.calc_fft(tr_int.data, tr_int.stats.npts, tr_int.stats.sampling_rate)
+            trace_decon = funcs.deconvolve(fft_ref, fft_int, sp=sp_val, time_domain=True)
+            sig_final, t_axis = funcs.interfer_tikhonov(trace_decon, sr_ref, r=r_val, dstack=dstack, time_domain=True)
+            
+            # Ensure sig_final and t_axis are 1D arrays of the same length
+            sig_final = np.array(sig_final)
+            t_axis = np.array(t_axis)
+            
+            # Force them to be the same length if slightly off due to resampling rounding
+            min_len = min(len(sig_final), len(t_axis))
+            sig_final = sig_final[:min_len]
+            t_axis = t_axis[:min_len]
+            
+            if common_times is None:
+                common_times = t_axis
+                csv_data['Time'] = t_axis
+            
+            csv_data[fname] = sig_final
+            
+            # Plot
+            y_pos = station_configs[fname]['depth']
+            
+            # Normalization & Amplification
+            max_val = np.max(np.abs(sig_final))
+            sig_norm = (sig_final / max_val * amp_factor) if max_val > 0 else sig_final
+            
+            # Use 'k' for signal
+            ax.plot(t_axis, sig_norm + y_pos, 'k', linewidth=0.5)
+            
+            # Fill Between - Error Handling
+            # Ensure boolean mask matches x dimension
+            try:
+                # Create mask explicitly
+                mask = (sig_norm > 0)
+                # Ensure mask is exactly the same shape as t_axis
+                if len(mask) == len(t_axis):
+                    ax.fill_between(t_axis, sig_norm + y_pos, y_pos, where=mask, color='grey', alpha=0.5)
+            except Exception as e:
+                # If fill_between fails, just skip it as per user request
+                print(f"Warning: fill_between failed for {fname}: {e}")
+            
+            # Label
+            trace_id = station_configs[fname]['stats'].get('id', fname)
+            ax.text(t_axis[0], y_pos, trace_id, va='bottom', ha='left', fontsize=8, fontweight='bold')
+            
+            # --- Peak Picking (Dual Sided) ---
+            # 1. Causal (t >= 0)
+            mask_c = t_axis >= 0
+            if np.any(mask_c):
+                idx_c = np.argmax(np.abs(sig_final[mask_c]))
+                # map back to global index
+                # np.where(mask_c)[0] gives indices where mask is true
+                global_idx_c = np.where(mask_c)[0][idx_c]
+                t_c = t_axis[global_idx_c]
+                val_c = sig_norm[global_idx_c]
+                
+                # Plot Causal Peak
+                ax.plot(t_c, val_c + y_pos, 'ro', markersize=2)
+                causal_points.append((y_pos, t_c))
+                
+            # 2. Acausal (t < 0)
+            mask_ac = t_axis < 0
+            if np.any(mask_ac):
+                idx_ac = np.argmax(np.abs(sig_final[mask_ac]))
+                global_idx_ac = np.where(mask_ac)[0][idx_ac]
+                t_ac = t_axis[global_idx_ac]
+                val_ac = sig_norm[global_idx_ac]
+                
+                # Plot Acausal Peak
+                ax.plot(t_ac, val_ac + y_pos, 'bo', markersize=2)
+                acausal_points.append((y_pos, t_ac))
+
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Sensor offset [m]')
+        ax.set_title('Deconvolved Signals')
+        
+        # Grid and T-Limits
+        if t_min is not None and t_max is not None:
+             ax.set_xlim(t_min, t_max)
+        elif t_min is not None:
+             ax.set_xlim(left=t_min)
+        elif t_max is not None:
+             ax.set_xlim(right=t_max)
+             
+        # Axis and Grid
+        ax.grid(True, linestyle='--', which='both', axis='both')
+        ax.minorticks_on()
+        ax.grid(True, which='minor', linestyle=':', alpha=0.4)
+        
+        # Trajectories
+        if len(causal_points) > 1:
+            causal_points.sort(key=lambda x: x[0])
+            ax.plot([p[1] for p in causal_points], [p[0] for p in causal_points], 'r--', linewidth=0.8, alpha=0.7)
+            
+        if len(acausal_points) > 1:
+            acausal_points.sort(key=lambda x: x[0])
+            ax.plot([p[1] for p in acausal_points], [p[0] for p in acausal_points], 'b--', linewidth=0.8, alpha=0.7)
+        
+        fig_deconv.tight_layout()
+        fig_deconv.savefig(img_deconv, format='png')
+        img_deconv.seek(0)
+        deconv_plot_url = base64.b64encode(img_deconv.getvalue()).decode()
+        plt.close(fig_deconv)
+        
+        # --- Regression Plot (Dual) ---
+        img_reg = io.BytesIO()
+        fig_reg, ax_r = plt.subplots(figsize=(6, 8))
+        
+        vs_strs = []
+        
+        # Causal Fit
+        if len(causal_points) > 1:
+            d_c = np.array([p[0] for p in causal_points])
+            t_c = np.array([p[1] for p in causal_points])
+            ax_r.scatter(d_c, t_c, color='r', label='Causal')
+            
+            s_c, i_c = np.polyfit(d_c, t_c, 1)
+            if abs(s_c) > 1e-9:
+                v_c = abs(1.0/s_c)
+                vs_strs.append(f"Causal Vs: {v_c:.2f} m/s")
+                
+                # Line
+                d_line = np.linspace(min(d_c), max(d_c), 100)
+                t_line = s_c * d_line + i_c
+                ax_r.plot(d_line, t_line, 'r-')
+                
+        # Acausal Fit
+        if len(acausal_points) > 1:
+            d_ac = np.array([p[0] for p in acausal_points])
+            t_ac = np.array([p[1] for p in acausal_points])
+            ax_r.scatter(d_ac, t_ac, color='b', label='Acausal')
+            
+            s_ac, i_ac = np.polyfit(d_ac, t_ac, 1)
+            if abs(s_ac) > 1e-9:
+                v_ac = abs(1.0/s_ac)
+                vs_strs.append(f"Acausal Vs: {v_ac:.2f} m/s")
+                
+                d_line = np.linspace(min(d_ac), max(d_ac), 100)
+                t_line = s_ac * d_line + i_ac
+                ax_r.plot(d_line, t_line, 'b-')
+        
+        ax_r.set_xlabel('Distance [m]')
+        ax_r.set_ylabel('Time [s]')
+        ax_r.set_title('Velocity Analysis')
+        ax_r.grid(True)
+        ax_r.legend()
+        
+        # Display Vs values
+        vs_estimate = "\n".join(vs_strs) if vs_strs else "N/A"
+        ax_r.text(0.05, 0.95, vs_estimate, transform=ax_r.transAxes, va='top', fontsize=10)
+        
+        fig_reg.tight_layout()
+        fig_reg.savefig(img_reg, format='png')
+        img_reg.seek(0)
+        reg_url = base64.b64encode(img_reg.getvalue()).decode()
+        plt.close(fig_reg)
+
+            
+        # --- JSON Data for Interactive GUI ---
+        import json
+        
+        # We need to reconstruct the final results list for JSON
+        # Since we iterated slightly differently (picking and plotting separated or mixed?)
+        # We did it mixed.
+        # But we have csv_data which has all signals. 'Time' is t_axis.
+        
+        json_results = {
+            'time': list(csv_data['Time']),
+            't_min': t_min,
+            't_max': t_max,
+            'stations': []
+        }
+        
+        for fname in processing_list:
+            if fname not in csv_data: continue
+            
+            sig = list(csv_data[fname])
+            depth = station_configs[fname]['depth']
+            trace_id = station_configs[fname]['stats'].get('id', fname)
+            
+            # Find the peaks we found earlier
+            # We didn't store them by filename, but simple lists.
+            # Let's re-find them simply or iterate carefully.
+            
+            # Re-pick for JSON structure
+            c_p = None
+            ac_p = None
+            
+            # Normalize for consistent amplitude in data
+            # Or pass raw and let JS normalize? 
+            # JS needs to amplify.
+            # Let's pass raw signal.
+            
+            # NOTE: We must handle nan/inf for JSON
+            # sig -> float list
+            sig = [float(x) for x in sig]
+            
+            # Causal Peak
+            mask_c = np.array(csv_data['Time']) >= 0
+            if np.any(mask_c):
+                idx_c = np.argmax(np.abs(np.array(sig)[mask_c]))
+                global_idx_c = np.where(mask_c)[0][idx_c]
+                c_p = float(csv_data['Time'][global_idx_c])
+                
+            # Acausal Peak
+            mask_ac = np.array(csv_data['Time']) < 0
+            if np.any(mask_ac):
+                idx_ac = np.argmax(np.abs(np.array(sig)[mask_ac]))
+                global_idx_ac = np.where(mask_ac)[0][idx_ac]
+                ac_p = float(csv_data['Time'][global_idx_ac])
+            
+            json_results['stations'].append({
+                'id': trace_id,
+                'depth': depth,
+                'signal': sig,
+                'peak_causal': c_p,
+                'peak_acausal': ac_p
+            })
+            
+        results_json = json.dumps(json_results)
+
+        # --- Model Sketch (Updated) ---
+        img_sketch = io.BytesIO()
+        fig_sketch, ax_s = plt.subplots(figsize=(6, 8))
+        
+        # Separate sensors
+        boreholes = [cfg for cfg in station_configs.values() if cfg['type'] == 'borehole']
+        buildings = [cfg for cfg in station_configs.values() if cfg['type'] == 'building']
+        
+        # Draw Ground Line
+        ax_s.axhline(0, color='brown', linewidth=2)
+        ax_s.text(0.5, 0.1, "Ground Surface", transform=ax_s.get_xaxis_transform(), ha='center', fontsize=8, color='brown')
+
+        # Draw Building
+        if buildings:
+            b_depths = [cfg['depth'] for cfg in buildings]
+            min_b = min(b_depths + [0])
+            max_b = max(b_depths)
+            width = 4
+            # Rectangle: x center 0. Bottom at min_b (or 0), Top at max_b
+            # Actually building usually starts at 0.
+            rect = plt.Rectangle((-width/2, 0), width, max_b, color='lightskyblue', alpha=0.5, zorder=1)
+            ax_s.add_patch(rect)
+            
+            # Sensors
+            for b in buildings:
+                 ax_s.plot(0, b['depth'], 'kv', markersize=8, zorder=2)
+                 ax_s.text(width/2 + 0.5, b['depth'], f"{b['depth']}m", va='center', fontsize=8)
+
+        # Draw Borehole
+        if boreholes:
+             h_depths = [cfg['depth'] for cfg in boreholes]
+             min_h = min(h_depths) # Negative
+             max_h = max(h_depths + [0])
+             
+             width = 2
+             # Tube
+             rect = plt.Rectangle((-width/2, min_h), width, -min_h, color='tan', alpha=0.5, zorder=1)
+             ax_s.add_patch(rect)
+             
+             # Sensors
+             for h in boreholes:
+                  ax_s.plot(0, h['depth'], 'ko', markersize=6, zorder=2)
+                  ax_s.text(width/2 + 0.5, h['depth'], f"{h['depth']}m", va='center', fontsize=8)
+
+        # Scaling
+        all_depths = [cfg['depth'] for cfg in station_configs.values()] + [0]
+        min_d, max_d = min(all_depths), max(all_depths)
+        margin = (max_d - min_d) * 0.1 if max_d != min_d else 5
+        ax_s.set_ylim(min_d - margin, max_d + margin)
+        ax_s.set_xlim(-10, 10)
+        ax_s.axis('off')
+        ax_s.set_title("Station Sketch")
+        
+        fig_sketch.tight_layout()
+        fig_sketch.savefig(img_sketch, format='png')
+        img_sketch.seek(0)
+        sketch_url = base64.b64encode(img_sketch.getvalue()).decode()
+        plt.close(fig_sketch)
+        
+        # Save CSV locally to serve
+        csv_filename = f"deconv_results_{uuid.uuid4().hex[:8]}.csv"
+        csv_path = os.path.join(deconv_folder, csv_filename)
+        
+        # Manually write CSV since we have dict of arrays
+        header = "Time," + ",".join([k for k in csv_data.keys() if k != 'Time'])
+        # ensure keys order
+        keys = [k for k in csv_data.keys() if k != 'Time']
+        
+        with open(csv_path, 'w') as f:
+            f.write(header + "\n")
+            for i in range(len(csv_data['Time'])):
+                row = f"{csv_data['Time'][i]:.6f}"
+                for k in keys:
+                    row += f",{csv_data[k][i]:.6e}"
+                f.write(row + "\n")
+                
+        session['deconv_csv_path'] = csv_path
+        
+        # Render
+        return render_template('index.html', 
+                               tab='deconvolution',
+                               files_info=files_info, # Keep table visible?
+                               deconv_plot_url=deconv_plot_url,
+                               sketch_url=sketch_url,
+                               reg_url=reg_url,
+                               vs_estimate=vs_estimate,
+                               has_results=True,
+                               results_json=results_json)
+
+    except Exception as e:
+        flash(f"Error in processing: {e}")
+        return redirect(url_for('index', tab='deconvolution'))
+
+@app.route('/deconv_download_csv')
+def deconv_download_csv():
+    path = session.get('deconv_csv_path')
+    if path and os.path.exists(path):
+         return flask.send_file(path, as_attachment=True, download_name="deconvolution_results.csv")
+    else:
+        flash("No CSV available.")
+        return redirect(url_for('index', tab='deconvolution'))
 @app.route('/thomson_haskell', methods=['POST'])
 def calc_thomson():
     try:
